@@ -1,0 +1,236 @@
+---
+title: "MVP NBA Salaries - STAT663A GLM"
+author: "Byran Ramirez and Jennifer Mac"
+toc: true
+execute: 
+  warning: false
+  message: false
+format: 
+  html:
+    embed-resources: true
+---
+
+## Step 0: Setup Libraries and Loading Data
+
+```{r}
+options(na.action = "na.fail")
+pacman::p_load(tidyverse, car, faraway, pROC, MASS, MuMIn)
+nba <- read.csv("nba_salaries.csv")
+# Run for dimensions (467 rows x 32 cols) and col data type
+# str(nba) 
+```
+
+## Step 1: Removing Unused Columns and NA's
+
+```{r}
+# Removing all rows with NAs (42) 
+sum(is.na(nba)); nba1 <- na.omit(nba)
+# Removed discreet variables columns (X, Position, Team), related variables, 
+# and variables we thought were irrelevant for salary
+# "nba1" dimensions (467 x 32) -> (451 × 12)
+nba1 <- nba1[, c(2:3, 5, 7:9, 12, 15, 18, 25:26, 31)]; names(nba1)
+```
+
+## Step 2: EDA
+
+```{r}
+options(scipen = 999)
+par(lwd = 5) 
+scatterplotMatrix(~ . + 1, nba1[, -1], smooth = FALSE, 
+                  diagonal = list(method = "density"),
+                  cex.labels = 4,
+                  col = "steelblue",
+                  pch = 16,
+                  label.pos = 0.5)
+
+ggplot(nba, aes(x = Salary)) +
+  geom_histogram(fill = "steelblue", bins = 15) +
+  labs(title = "Distribution of Salary",
+       x = "Salaries by",
+       y = "Count") + 
+  theme(axis.text.x = element_text(hjust = 0.5))
+
+ggplot(nba, aes(x = log(Salary))) +
+  geom_histogram(fill = "steelblue", bins = 15) +
+  labs(title = "Distribution of log(Salary)",
+       x = "Salaries by",
+       y = "Count") 
+
+ggplot(nba, aes(x = Salary^0.25)) +
+  geom_histogram(fill = "steelblue", bins = 15) +
+  labs(title = "Distribution of Salary^0.25",
+       x = "Salaries by",
+       y = "Count")
+options(scipen = 0)
+```
+
+## Step 3: Create Full Model
+
+```{r}
+mod_full <- lm(Salary ~ ., nba1[, -1]); summary(mod_full)
+summary(powerTransform(mod_full)) # power 0.25
+par(lwd = 2);boxcox(mod_full, lambda = seq(0.1, 0.4, by = 0.1))
+
+mod_full <- lm(Salary^0.25 ~ ., nba1[, -1]); summary(mod_full)
+summary(powerTransform(mod_full)) # power 1
+```
+
+## Step 3: Use BIC to find Relevant variables
+
+```{r}
+mod_step0 <- step(mod_full, trace=0); summary(mod_step0)
+par(lwd = 2);par(mfrow = c(1, 2)); plot(mod_step0, 1:2)
+vif(mod_step0)
+
+# We used this code to extract variables used in the BIC model  
+# match(all.vars(formula(mod_step0)), names(nba1))
+
+nba2 <- nba1[, c(1:5, 8:10, 12)]; names(nba2)
+```
+
+## Step 4: Check for Multicollinearity
+
+```{r}
+# Learned from Linear Regression 
+cor_matrix <- cor(nba[, -c(1:2, 4, 6, 32)], use = "complete.obs")
+corrplot::corrplot(cor_matrix * (abs(cor_matrix) > 0.8),
+         method = "color",          
+         is.corr = FALSE,
+         tl.col = "black",          
+         addgrid.col = "grey95",
+         title = "Multicollinearity: All Variables", 
+         cex.main = 1.5)
+
+cor_matrix <- cor(nba2[, -1], use = "complete.obs")
+corrplot::corrplot(cor_matrix * (abs(cor_matrix) > 0.8),
+         method = "color",          
+         is.corr = FALSE,
+         tl.col = "black",      
+         addgrid.col = "grey95",
+         title = "Multicollinearity: Relavent Variables", 
+         cex.main = 1.2)
+```
+
+## Step 5: Find Best Model using BIC and Dredge()
+
+```{r}
+# Dredge requires turning nba3[, -c(1)] into a df 
+nba2_noname <- nba2[, -1]
+mod_full <- lm(Salary^0.25 ~ ., nba2_noname)
+mod_step0 <- step(mod_full, trace=0); BIC(mod_step0); summary(mod_step0)
+
+dd <- dredge(mod_step0, rank = "BIC")
+best_mod <- get.models(dd, subset = 1)[[1]]; BIC(best_mod); summary(best_mod)
+
+# Checking assumptions after Step and Dredge() - Good!
+par(mfrow = c(1, 2)); plot(best_mod, 1:2)
+ncvTest(best_mod); shapiro.test(resid(best_mod))
+vif(mod_full)
+```
+
+## Step 6: Extra Analysis
+
+#### Leverage Points
+
+```{r}
+plot(hatvalues(best_mod), rstandard(best_mod), 
+     xlab = "Fitted Values", 
+     ylab = "Standardized Residuals")
+abline(h = c(2, -2), lty = 2, col = "blue")
+
+p <- length(coef(best_mod)) - 1
+n <- nrow(nba1)
+abline(v = 3 * (p + 1) / n, col = "red", lty = 2)
+
+plot(hatvalues(best_mod), rstandard(best_mod), 
+     xlab = "Fitted Values", 
+     ylab = "Standardized Residuals")
+abline(h = c(3, -3), lty = 2, col = "blue")
+abline(v = 3 * (p + 1) / n, col = "red", lty = 2)
+```
+
+#### Outliers, Leverage, and Bad Leverage Points
+
+```{r}
+outlier_ind <- which(abs(rstandard(best_mod)) > 3); nba1[outlier_ind, c(1:5,12)]
+ind_lev <- which(hatvalues(best_mod) > 3*(p+1)/n); nba1[ind_lev, c(1:5,12)]
+
+# no bad leverage
+bad_leve <- which(abs(rstandard(best_mod)) > 2 & hatvalues(best_mod) > 2*(p+1)/n); nba1[bad_leve, c(1:5,12)]
+```
+
+## Step 7: Remove Outliers and Refit model
+
+```{r}
+best_mod <- lm(Salary^0.25 ~ Age + GP + GS + log(PTS) + 1 , 
+               nba1[-c(2, 18, 21, 71, 423, 451), ]); summary(best_mod)
+summary(powerTransform(best_mod)); boxcox(best_mod, lambda = seq(0, 2, by = 0.1))
+
+plot(best_mod,1:4); ncvTest(best_mod)
+```
+
+## Step 8: Applying New Data
+
+```{r}
+# PRETTY GOOD AT PREDICTING MVP PLAYERS
+mvp_data <- data.frame(
+  Season  = c("2019-20", "2020-21", "2021-22", "2022-23", "2023-24", "2024-25"),
+  Name    = c("Giannis Antetokounmpo", "Nikola Jokic", "Nikola Jokic",
+              "Joel Embiid", "Nikola Jokic", "Shai Gilgeous-Alexander"),
+  Age     = c(25, 26, 27, 28, 29, 26),
+  GP      = c(63, 72, 74, 66, 79, 76),
+  GS      = c(63, 72, 74, 65, 79, 76),
+  PTS     = c(29.5, 26.4, 27.1, 33.1, 26.4, 32.7),
+  Salary  = c(25842697, 29542010, 31044906, 33616770, 47607350, 35859950))
+
+mvp_data |>
+  mutate(pred = predict(best_mod, mvp_data)^4) |>
+  mutate(diff = round(Salary/pred,2))
+
+# NOT GOOD AT PREDICTING NORMAL PLAYERS
+reg_players <- data.frame(
+  Name   = c("Karl-Anthony Towns", "Rudy Gobert", "Jamal Murray", "Jrue Holiday"),
+  Age    = c(29, 32, 27, 34),
+  GP     = c(74, 68, 59, 62),
+  GS     = c(74, 68, 59, 62),
+  PTS    = c(24.4, 12.0, 21.4, 11.1),
+  Salary = c(49200000, 43827586, 36016200, 30400000))
+
+reg_players |>
+  mutate(pred = predict(best_mod, reg_players)^4) |>
+  mutate(diff = round(Salary/pred, 2)) 
+
+# PRED VS ACTUAL SALARY
+options(scipen = 999)
+nba1 |>
+  mutate(pred = predict(best_mod, nba1)^4) |>
+  mutate(diff = round(Salary/pred, 2)) |>
+  ggplot(aes(pred^0.25, Salary^0.25)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red")
+options(scipen = 0)
+```
+
+## Bonus: Applying Interaction Effect 
+
+```{r}
+nba3 <- nba2[, c(2:5, 9)]; names(nba3)
+
+mod_full <- lm(Salary^0.25 ~ .^2, nba3); summary(mod_full)
+mod_step0 <- step(mod_full, trace=0); summary(mod_step0)
+summary(powerTransform(mod_step0)); boxcox(mod_step0, lambda = seq(0, 0.5, by = 0.1))
+
+dd <- dredge(mod_step0, rank = "BIC", 
+             subset = 
+               dc("Age", "Age:PTS") & dc("PTS", "Age:PTS") &
+               dc("GP", "GP:GS") & dc("GS", "GP:GS") &
+               dc("GP", "GP:PTS") & dc("PTS", "GP:PTS"))
+
+best_mod <- get.models(dd, subset = 1)[[1]]; BIC(best_mod); summary(best_mod)
+# Checking assumptions after Step and Dredge() - Good!
+par(mfrow = c(1, 2)); plot(best_mod, 1:2)
+ncvTest(best_mod); shapiro.test(resid(best_mod))
+
+plot(best_mod,1:4); ncvTest(best_mod)
+```
